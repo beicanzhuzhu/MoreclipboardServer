@@ -1,0 +1,18 @@
+[package]
+name = "clipboard_server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1.0", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] } # 用于将广播转为流
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dashmap = "6.0"      # 高并发哈希表
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+futures = "0.3"
+rand = "0.8"
+jsonwebtoken = "9"
