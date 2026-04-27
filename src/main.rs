@@ -142,7 +142,12 @@ async fn main() {
         .await
         .expect("Failed to connect to Postgres");
 
-    println!("✅ Connected to Database at koqio.tech");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("Failed to run database migrations");
+
+    println!("✅ Connected to Database");
 
     let app_state = Arc::new(AppState {
         db: pool,
@@ -457,7 +462,7 @@ async fn get_token(
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, sqlx::FromRow)]
 struct UserInfo {
     id: i64,
     username: String,
@@ -468,9 +473,8 @@ struct UserInfo {
 async fn admin_list_users(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<UserInfo>>, StatusCode> {
-    let users = sqlx::query_as!(
-        UserInfo,
-        "SELECT id, username, is_admin as \"is_admin!\", created_at FROM users ORDER BY id DESC"
+    let users = sqlx::query_as::<_, UserInfo>(
+        "SELECT id, username, is_admin, created_at FROM users ORDER BY id DESC",
     )
     .fetch_all(&state.db)
     .await

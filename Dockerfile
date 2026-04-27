@@ -11,9 +11,7 @@ RUN rm -rf src && \
     rm -f target/release/deps/clipboard_server*
 
 COPY . .
-COPY .sqlx .sqlx
 
-ENV SQLX_OFFLINE=true
 RUN cargo build --release
 
 FROM debian:bookworm-slim

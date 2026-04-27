@@ -3,3 +3,6 @@ src.tar
 .idea
 test.http
 .codex
+.env
+.env.*
+!.env.example
