@@ -2,4 +2,4 @@
 src.tar
 .idea
 test.http
-.sqlx
+.codex
