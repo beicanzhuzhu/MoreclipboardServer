@@ -1,36 +1,217 @@
-use crate::{api::response::not_implemented, app_state::AppState};
-use axum::{
-    response::Response,
-    routing::{get, post},
-    Router,
+use crate::{
+    api::response::ApiError,
+    app_state::AppState,
+    application::auth_service::{self, AuthServiceError, LoginInput, RegisterInput, Session},
+    domain::{AuthenticatedUser, UserProfile},
+    infrastructure::jwt,
 };
+use axum::{
+    extract::{Extension, Request, State},
+    http::{header, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-pub fn router() -> Router<Arc<AppState>> {
+pub fn public_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
         .route("/auth/refresh", post(refresh))
+}
+
+pub fn protected_router() -> Router<Arc<AppState>> {
+    Router::new()
         .route("/auth/logout", post(logout))
         .route("/me", get(me))
 }
 
-async fn register() -> Response {
-    not_implemented("POST /api/v1/auth/register")
+pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, ApiError> {
+    let token = bearer_token(req.headers())?;
+    let claims = jwt::decode_access_token(token)
+        .map_err(|_| ApiError::unauthorized("invalid or expired access token"))?;
+
+    req.extensions_mut().insert(AuthenticatedUser {
+        user_id: claims.sub,
+        device_id: claims.device_id,
+        is_admin: claims.is_admin,
+    });
+
+    Ok(next.run(req).await)
 }
 
-async fn login() -> Response {
-    not_implemented("POST /api/v1/auth/login")
+#[derive(Deserialize)]
+struct RegisterRequest {
+    username: String,
+    password: String,
+    display_name: Option<String>,
 }
 
-async fn refresh() -> Response {
-    not_implemented("POST /api/v1/auth/refresh")
+#[derive(Deserialize)]
+struct LoginRequest {
+    username: String,
+    password: String,
+    device_id: Option<String>,
+    device_name: Option<String>,
+    platform: Option<String>,
 }
 
-async fn logout() -> Response {
-    not_implemented("POST /api/v1/auth/logout")
+#[derive(Deserialize)]
+struct RefreshRequest {
+    refresh_token: String,
 }
 
-async fn me() -> Response {
-    not_implemented("GET /api/v1/me")
+#[derive(Deserialize)]
+struct LogoutRequest {
+    refresh_token: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AuthResponse {
+    token_type: &'static str,
+    access_token: String,
+    refresh_token: String,
+    expires_in: usize,
+    user: UserProfile,
+}
+
+#[derive(Serialize)]
+struct MeResponse {
+    user: UserProfile,
+    device_id: String,
+    is_admin: bool,
+}
+
+#[derive(Serialize)]
+struct MessageResponse {
+    message: &'static str,
+}
+
+async fn register(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<RegisterRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let user = auth_service::register(
+        &state.db,
+        RegisterInput {
+            username: payload.username,
+            password: payload.password,
+            display_name: payload.display_name,
+        },
+    )
+    .await
+    .map_err(ApiError::from)?;
+
+    Ok((StatusCode::CREATED, Json(user)))
+}
+
+async fn login(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<LoginRequest>,
+) -> Result<Json<AuthResponse>, ApiError> {
+    let session = auth_service::login(
+        &state.db,
+        LoginInput {
+            username: payload.username,
+            password: payload.password,
+            device_id: payload.device_id,
+            device_name: payload.device_name,
+            platform: payload.platform,
+        },
+    )
+    .await
+    .map_err(ApiError::from)?;
+
+    Ok(Json(AuthResponse::from(session)))
+}
+
+async fn refresh(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<RefreshRequest>,
+) -> Result<Json<AuthResponse>, ApiError> {
+    let session = auth_service::refresh_session(&state.db, &payload.refresh_token)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(AuthResponse::from(session)))
+}
+
+async fn logout(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthenticatedUser>,
+    payload: Option<Json<LogoutRequest>>,
+) -> Result<Json<MessageResponse>, ApiError> {
+    let refresh_token = payload
+        .as_ref()
+        .and_then(|Json(payload)| payload.refresh_token.as_deref());
+
+    auth_service::logout(&state.db, user.user_id, &user.device_id, refresh_token)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(MessageResponse {
+        message: "logged out",
+    }))
+}
+
+async fn me(
+    State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthenticatedUser>,
+) -> Result<Json<MeResponse>, ApiError> {
+    let user = auth_service::get_user_profile(&state.db, auth_user.user_id)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(MeResponse {
+        user,
+        device_id: auth_user.device_id,
+        is_admin: auth_user.is_admin,
+    }))
+}
+
+fn bearer_token(headers: &axum::http::HeaderMap) -> Result<&str, ApiError> {
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .ok_or_else(|| ApiError::unauthorized("missing authorization header"))?
+        .to_str()
+        .map_err(|_| ApiError::unauthorized("invalid authorization header"))?;
+
+    auth.strip_prefix("Bearer ")
+        .ok_or_else(|| ApiError::unauthorized("authorization header must use bearer token"))
+}
+
+impl From<Session> for AuthResponse {
+    fn from(session: Session) -> Self {
+        Self {
+            token_type: "Bearer",
+            access_token: session.access_token,
+            refresh_token: session.refresh_token,
+            expires_in: session.expires_in,
+            user: session.user,
+        }
+    }
+}
+
+impl From<AuthServiceError> for ApiError {
+    fn from(error: AuthServiceError) -> Self {
+        match error {
+            AuthServiceError::Validation(message) => ApiError::bad_request(message),
+            AuthServiceError::UsernameTaken => ApiError::conflict("username already exists"),
+            AuthServiceError::InvalidCredentials => {
+                ApiError::unauthorized("invalid username or password")
+            }
+            AuthServiceError::InvalidToken => ApiError::unauthorized("invalid or expired token"),
+            AuthServiceError::NotFound => ApiError::not_found("user not found"),
+            AuthServiceError::HashFailed | AuthServiceError::TokenFailed => {
+                ApiError::internal("authentication failed")
+            }
+            AuthServiceError::Database(error) => {
+                tracing::error!(?error, "authentication database operation failed");
+                ApiError::internal("authentication failed")
+            }
+        }
+    }
 }

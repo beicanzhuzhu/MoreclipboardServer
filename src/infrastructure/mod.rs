@@ -1,6 +1,9 @@
+//! Infrastructure layer.
+//!
+//! Keep concrete integrations here. At the moment only PostgreSQL setup is
+//! active; JWT, hashing, notification, object storage, and thumbnail modules can
+//! be introduced when their business flows are implemented.
+
 pub mod database;
 pub mod jwt;
-pub mod notification;
-pub mod object_storage;
 pub mod password_hash;
-pub mod thumbnail;
