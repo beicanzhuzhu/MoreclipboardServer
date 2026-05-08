@@ -20,7 +20,6 @@ pub struct Claims {
     pub iat: usize,
     pub jti: String,
     pub token_type: TokenType,
-    pub is_admin: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -30,24 +29,12 @@ pub enum TokenType {
     Refresh,
 }
 
-pub fn access_claims(user_id: UserId, device_id: String, is_admin: bool) -> Claims {
-    claims(
-        user_id,
-        device_id,
-        is_admin,
-        TokenType::Access,
-        ACCESS_TTL_SECONDS,
-    )
+pub fn access_claims(user_id: UserId, device_id: String) -> Claims {
+    claims(user_id, device_id, TokenType::Access, ACCESS_TTL_SECONDS)
 }
 
-pub fn refresh_claims(user_id: UserId, device_id: String, is_admin: bool) -> Claims {
-    claims(
-        user_id,
-        device_id,
-        is_admin,
-        TokenType::Refresh,
-        REFRESH_TTL_SECONDS,
-    )
+pub fn refresh_claims(user_id: UserId, device_id: String) -> Claims {
+    claims(user_id, device_id, TokenType::Refresh, REFRESH_TTL_SECONDS)
 }
 
 pub fn encode_token(claims: &Claims) -> Result<String, jsonwebtoken::errors::Error> {
@@ -87,13 +74,7 @@ fn decode_token(token: &str) -> Result<Claims, jsonwebtoken::errors::Error> {
     .map(|data| data.claims)
 }
 
-fn claims(
-    user_id: UserId,
-    device_id: String,
-    is_admin: bool,
-    token_type: TokenType,
-    ttl_seconds: usize,
-) -> Claims {
+fn claims(user_id: UserId, device_id: String, token_type: TokenType, ttl_seconds: usize) -> Claims {
     let issued_at = now_seconds();
     Claims {
         sub: user_id,
@@ -102,7 +83,6 @@ fn claims(
         iat: issued_at,
         jti: next_jti(user_id),
         token_type,
-        is_admin,
     }
 }
 

@@ -37,7 +37,6 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, ApiE
     req.extensions_mut().insert(AuthenticatedUser {
         user_id: claims.sub,
         device_id: claims.device_id,
-        is_admin: claims.is_admin,
     });
 
     Ok(next.run(req).await)
@@ -82,7 +81,6 @@ struct AuthResponse {
 struct MeResponse {
     user: UserProfile,
     device_id: String,
-    is_admin: bool,
 }
 
 #[derive(Serialize)]
@@ -168,7 +166,6 @@ async fn me(
     Ok(Json(MeResponse {
         user,
         device_id: auth_user.device_id,
-        is_admin: auth_user.is_admin,
     }))
 }
 

@@ -14,7 +14,7 @@ pub async fn search_users(
     let pattern = format!("%{}%", query);
     sqlx::query_as::<_, UserProfile>(
         r#"
-        SELECT id, username, display_name, is_admin, created_at
+        SELECT id, username, display_name, created_at
         FROM users
         WHERE deleted_at IS NULL
           AND id <> $1

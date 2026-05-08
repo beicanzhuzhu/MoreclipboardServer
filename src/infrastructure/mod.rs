@@ -6,4 +6,5 @@
 
 pub mod database;
 pub mod jwt;
+pub mod object_store;
 pub mod password_hash;

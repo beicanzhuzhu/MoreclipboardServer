@@ -4,4 +4,6 @@
 //! with real behavior.
 
 pub mod auth_service;
+pub mod clipboard_service;
+pub mod share_service;
 pub mod user_service;

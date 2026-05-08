@@ -5,7 +5,13 @@ mod domain;
 mod infrastructure;
 
 use crate::app_state::AppState;
-use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
+use axum::{
+    extract::{DefaultBodyLimit, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::get,
+    Json, Router,
+};
 use dotenvy::dotenv;
 use serde::Serialize;
 use std::{env, net::SocketAddr, sync::Arc};
@@ -22,6 +28,7 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(health))
         .nest("/api/v1", api::router())
+        .layer(DefaultBodyLimit::max(max_upload_bytes()))
         .layer(CorsLayer::permissive())
         .with_state(app_state);
 
@@ -47,4 +54,11 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let _database_pool_is_closed = state.db.is_closed();
 
     (StatusCode::OK, Json(HealthResponse { status: "ok" }))
+}
+
+fn max_upload_bytes() -> usize {
+    env::var("MAX_UPLOAD_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(100 * 1024 * 1024)
 }

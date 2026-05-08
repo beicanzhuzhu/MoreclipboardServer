@@ -6,3 +6,4 @@ test.http
 .env
 .env.*
 !.env.example
+var/

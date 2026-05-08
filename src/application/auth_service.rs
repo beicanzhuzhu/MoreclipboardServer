@@ -35,7 +35,6 @@ struct LoginUserRow {
     username: String,
     display_name: Option<String>,
     password_hash: String,
-    is_admin: bool,
     created_at: NaiveDateTime,
 }
 
@@ -58,7 +57,7 @@ pub async fn register(
         r#"
         INSERT INTO users (username, display_name, password_hash)
         VALUES ($1, $2, $3)
-        RETURNING id, username, display_name, is_admin, created_at
+        RETURNING id, username, display_name, created_at
         "#,
     )
     .bind(input.username.trim())
@@ -74,7 +73,7 @@ pub async fn register(
 pub async fn login(db: &Pool<Postgres>, input: LoginInput) -> Result<Session, AuthServiceError> {
     let user = sqlx::query_as::<_, LoginUserRow>(
         r#"
-        SELECT id, username, display_name, password_hash, is_admin, created_at
+        SELECT id, username, display_name, password_hash, created_at
         FROM users
         WHERE username = $1 AND deleted_at IS NULL
         "#,
@@ -92,7 +91,6 @@ pub async fn login(db: &Pool<Postgres>, input: LoginInput) -> Result<Session, Au
         id: user.id,
         username: user.username,
         display_name: user.display_name,
-        is_admin: user.is_admin,
         created_at: user.created_at,
     };
 
@@ -179,7 +177,7 @@ pub async fn get_user_profile(
 ) -> Result<UserProfile, AuthServiceError> {
     sqlx::query_as::<_, UserProfile>(
         r#"
-        SELECT id, username, display_name, is_admin, created_at
+        SELECT id, username, display_name, created_at
         FROM users
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -195,8 +193,8 @@ async fn issue_session(
     user: UserProfile,
     device_id: String,
 ) -> Result<Session, AuthServiceError> {
-    let access_claims = jwt::access_claims(user.id, device_id.clone(), user.is_admin);
-    let refresh_claims = jwt::refresh_claims(user.id, device_id.clone(), user.is_admin);
+    let access_claims = jwt::access_claims(user.id, device_id.clone());
+    let refresh_claims = jwt::refresh_claims(user.id, device_id.clone());
     let access_token =
         jwt::encode_token(&access_claims).map_err(|_| AuthServiceError::TokenFailed)?;
     let refresh_token =
