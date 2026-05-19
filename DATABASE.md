@@ -38,6 +38,30 @@ objects/ab/cd/ef...
 
 PostgreSQL stores only object metadata and references.
 
+## Current Schema
+
+The project intentionally uses five application tables:
+
+```text
+users
+objects
+clipboard_items
+friendships
+shares
+```
+
+`clipboard_items` is both the current clipboard source and the history table:
+
+- current clipboard: newest item for `owner_id`
+- paged history: `GET /api/v1/clipboard/history?limit=20&cursor=...`
+- full history: `GET /api/v1/clipboard/history?all=true`
+
+`friendships` stores pending/accepted friend relationships. A clipboard item can
+only be shared to an accepted friend.
+
+File paths are not stored in PostgreSQL. The server derives them from
+`objects.hash` with `objects/ab/cd/ef...`.
+
 ## Useful Checks
 
 Check container health:

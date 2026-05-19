@@ -1,5 +1,8 @@
 use crate::{
-    application::clipboard_service::ClipboardItem,
+    application::{
+        clipboard_service::{self, ClipboardItem},
+        friend_service,
+    },
     domain::{UserId, UserProfile},
 };
 use chrono::NaiveDateTime;
@@ -50,6 +53,12 @@ pub async fn create_share(
     if from_user_id == target_user_id {
         return Err(ShareServiceError::Validation(
             "cannot share an item with yourself".to_string(),
+        ));
+    }
+
+    if !friend_service::are_friends(db, from_user_id, target_user_id).await? {
+        return Err(ShareServiceError::Validation(
+            "can only share clipboard items with accepted friends".to_string(),
         ));
     }
 
@@ -110,17 +119,12 @@ pub async fn accept(
 
     let copied_item = sqlx::query_as::<_, ClipboardItem>(
         r#"
-        INSERT INTO clipboard_items (
-            owner_id, content_type, mime_type, filename, summary,
-            text_content, object_hash, thumbnail_hash, content_hash
-        )
-        SELECT $1, content_type, mime_type, filename, summary,
-               text_content, object_hash, thumbnail_hash, content_hash
+        INSERT INTO clipboard_items (owner_id, content_type, text_content, object_hash, filename)
+        SELECT $1, content_type, text_content, object_hash, filename
         FROM clipboard_items
-        WHERE id = $2 AND deleted_at IS NULL
-        RETURNING id, owner_id, content_type, mime_type, filename, summary,
-                  text_content, object_hash, thumbnail_hash, content_hash,
-                  source_device_id, created_at, deleted_at
+        WHERE id = $2
+        RETURNING id, owner_id, content_type, filename, text_content, object_hash,
+                  NULL::TEXT AS mime_type, NULL::TEXT AS content_hash, created_at
         "#,
     )
     .bind(target_user_id)
@@ -128,27 +132,12 @@ pub async fn accept(
     .fetch_one(&mut *tx)
     .await?;
 
-    sqlx::query(
-        r#"
-        INSERT INTO clipboard_file_entries (
-            item_id, object_hash, display_name, relative_path,
-            mime_type, byte_size, position
-        )
-        SELECT $1, object_hash, display_name, relative_path,
-               mime_type, byte_size, position
-        FROM clipboard_file_entries
-        WHERE item_id = $2
-        ORDER BY position ASC
-        "#,
-    )
-    .bind(copied_item.id)
-    .bind(share.item_id)
-    .execute(&mut *tx)
-    .await?;
-
     tx.commit().await?;
 
-    Ok(AcceptedShare { share, copied_item })
+    Ok(AcceptedShare {
+        share,
+        copied_item: clipboard_service::decorate_item(copied_item),
+    })
 }
 
 pub async fn reject(
@@ -192,13 +181,12 @@ async fn list_shares(
             s.id AS share_id, s.item_id, s.from_user_id, s.target_user_id,
             s.status, s.message, s.created_at AS share_created_at, s.responded_at,
             fu.id AS from_id, fu.username AS from_username,
-            fu.display_name AS from_display_name, fu.created_at AS from_created_at,
+            fu.created_at AS from_created_at,
             tu.id AS target_id, tu.username AS target_username,
-            tu.display_name AS target_display_name, tu.created_at AS target_created_at,
-            ci.id AS item_id_value, ci.owner_id, ci.content_type, ci.mime_type,
-            ci.filename, ci.summary, ci.text_content, ci.object_hash,
-            ci.thumbnail_hash, ci.content_hash, ci.source_device_id,
-            ci.created_at AS item_created_at, ci.deleted_at
+            tu.created_at AS target_created_at,
+            ci.id AS item_id_value, ci.owner_id, ci.content_type,
+            ci.filename, ci.text_content, ci.object_hash,
+            ci.created_at AS item_created_at
         FROM shares s
         JOIN users fu ON fu.id = s.from_user_id
         JOIN users tu ON tu.id = s.target_user_id
@@ -229,25 +217,17 @@ struct ShareDetailRow {
     responded_at: Option<NaiveDateTime>,
     from_id: UserId,
     from_username: String,
-    from_display_name: Option<String>,
     from_created_at: NaiveDateTime,
     target_id: UserId,
     target_username: String,
-    target_display_name: Option<String>,
     target_created_at: NaiveDateTime,
     item_id_value: i64,
     owner_id: UserId,
     content_type: String,
-    mime_type: Option<String>,
     filename: Option<String>,
-    summary: Option<String>,
     text_content: Option<String>,
     object_hash: Option<String>,
-    thumbnail_hash: Option<String>,
-    content_hash: Option<String>,
-    source_device_id: Option<String>,
     item_created_at: NaiveDateTime,
-    deleted_at: Option<NaiveDateTime>,
 }
 
 impl From<ShareDetailRow> for ShareDetail {
@@ -266,30 +246,24 @@ impl From<ShareDetailRow> for ShareDetail {
             from_user: UserProfile {
                 id: row.from_id,
                 username: row.from_username,
-                display_name: row.from_display_name,
                 created_at: row.from_created_at,
             },
             target_user: UserProfile {
                 id: row.target_id,
                 username: row.target_username,
-                display_name: row.target_display_name,
                 created_at: row.target_created_at,
             },
-            item: ClipboardItem {
+            item: clipboard_service::decorate_item(ClipboardItem {
                 id: row.item_id_value,
                 owner_id: row.owner_id,
                 content_type: row.content_type,
-                mime_type: row.mime_type,
                 filename: row.filename,
-                summary: row.summary,
                 text_content: row.text_content,
                 object_hash: row.object_hash,
-                thumbnail_hash: row.thumbnail_hash,
-                content_hash: row.content_hash,
-                source_device_id: row.source_device_id,
+                mime_type: None,
+                content_hash: None,
                 created_at: row.item_created_at,
-                deleted_at: row.deleted_at,
-            },
+            }),
         }
     }
 }
@@ -298,6 +272,9 @@ fn map_create_error(error: sqlx::Error) -> ShareServiceError {
     if let sqlx::Error::Database(db_error) = &error {
         if db_error.constraint() == Some("shares_item_target_idx") {
             return ShareServiceError::Conflict;
+        }
+        if db_error.constraint() == Some("shares_item_id_from_user_id_fkey") {
+            return ShareServiceError::NotFound;
         }
     }
     ShareServiceError::Database(error)

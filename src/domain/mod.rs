@@ -18,6 +18,5 @@ pub struct AuthenticatedUser {
 pub struct UserProfile {
     pub id: UserId,
     pub username: String,
-    pub display_name: Option<String>,
     pub created_at: NaiveDateTime,
 }

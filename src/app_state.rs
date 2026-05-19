@@ -29,13 +29,14 @@ impl AppState {
     }
 
     fn sender_for(&self, user_id: UserId) -> broadcast::Sender<AppEvent> {
-        if let Some(entry) = self.channels.get(&user_id) {
-            return entry.value().clone();
-        }
-
-        let (tx, _rx) = broadcast::channel(128);
-        self.channels.insert(user_id, tx.clone());
-        tx
+        self.channels
+            .entry(user_id)
+            .or_insert_with(|| {
+                let (tx, _rx) = broadcast::channel(128);
+                tx
+            })
+            .value()
+            .clone()
     }
 }
 
@@ -63,6 +64,18 @@ pub enum AppEvent {
         share_id: i64,
         item_id: i64,
         target_user_id: UserId,
+        status: String,
+        responded_at: String,
+    },
+    FriendRequestReceived {
+        friendship_id: i64,
+        requester_id: UserId,
+        message: Option<String>,
+        created_at: String,
+    },
+    FriendshipResponded {
+        friendship_id: i64,
+        addressee_id: UserId,
         status: String,
         responded_at: String,
     },

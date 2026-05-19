@@ -116,6 +116,14 @@ async fn accept(
             responded_at: Utc::now().to_rfc3339(),
         },
     );
+    state.notify(
+        user.user_id,
+        AppEvent::ClipboardUpdated {
+            item_id: accepted.copied_item.id,
+            source_device_id: "share_accept".to_string(),
+            updated_at: Utc::now().to_rfc3339(),
+        },
+    );
 
     Ok(Json(AcceptResponse { share: accepted }))
 }

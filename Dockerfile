@@ -26,6 +26,6 @@ WORKDIR /app
 COPY --from=builder /app/target/release/clipboard_server /app/server
 
 # 暴露端口 (这就仅仅是个文档说明)
-EXPOSE 3000
+EXPOSE 3100
 
 CMD ["./server"]

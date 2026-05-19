@@ -46,7 +46,6 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, ApiE
 struct RegisterRequest {
     username: String,
     password: String,
-    display_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -54,8 +53,6 @@ struct LoginRequest {
     username: String,
     password: String,
     device_id: Option<String>,
-    device_name: Option<String>,
-    platform: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -97,7 +94,6 @@ async fn register(
         RegisterInput {
             username: payload.username,
             password: payload.password,
-            display_name: payload.display_name,
         },
     )
     .await
@@ -116,8 +112,6 @@ async fn login(
             username: payload.username,
             password: payload.password,
             device_id: payload.device_id,
-            device_name: payload.device_name,
-            platform: payload.platform,
         },
     )
     .await

@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod clipboard;
+pub mod friends;
 pub mod realtime;
 mod response;
 pub mod shares;
@@ -14,6 +15,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(auth::protected_router())
         .merge(users::router())
         .merge(clipboard::router())
+        .merge(friends::router())
         .merge(shares::router())
         .merge(realtime::router())
         .route_layer(middleware::from_fn(auth::require_auth));

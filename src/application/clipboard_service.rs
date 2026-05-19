@@ -10,20 +10,14 @@ use sqlx::{Pool, Postgres};
 #[derive(Clone, Debug)]
 pub struct CreateTextInput {
     pub content_type: String,
-    pub mime_type: Option<String>,
     pub filename: Option<String>,
-    pub summary: Option<String>,
     pub text_content: String,
-    pub source_device_id: String,
 }
 
 #[derive(Clone, Debug)]
 pub struct CreateObjectInput {
     pub content_type: String,
-    pub mime_type: Option<String>,
     pub filename: Option<String>,
-    pub summary: Option<String>,
-    pub source_device_id: String,
     pub object: StoredObject,
 }
 
@@ -32,22 +26,17 @@ pub struct ClipboardItem {
     pub id: i64,
     pub owner_id: UserId,
     pub content_type: String,
-    pub mime_type: Option<String>,
     pub filename: Option<String>,
-    pub summary: Option<String>,
     pub text_content: Option<String>,
     pub object_hash: Option<String>,
-    pub thumbnail_hash: Option<String>,
+    pub mime_type: Option<String>,
     pub content_hash: Option<String>,
-    pub source_device_id: Option<String>,
     pub created_at: NaiveDateTime,
-    pub deleted_at: Option<NaiveDateTime>,
 }
 
-#[derive(Clone, Debug, sqlx::FromRow)]
+#[derive(Clone, Debug)]
 pub struct LocalObject {
     pub byte_size: i64,
-    pub mime_type: Option<String>,
     pub storage_path: String,
 }
 
@@ -64,35 +53,23 @@ pub async fn create_text_current(
     input: CreateTextInput,
 ) -> Result<ClipboardItem, ClipboardServiceError> {
     validate_text_input(&input)?;
-    let content_hash = sha256_hex(input.text_content.as_bytes());
-    let mut tx = db.begin().await?;
 
     let item = sqlx::query_as::<_, ClipboardItem>(
         r#"
-        INSERT INTO clipboard_items (
-            owner_id, content_type, mime_type, filename, summary,
-            text_content, content_hash, source_device_id
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        RETURNING id, owner_id, content_type, mime_type, filename, summary,
-                  text_content, object_hash, thumbnail_hash, content_hash,
-                  source_device_id, created_at, deleted_at
+        INSERT INTO clipboard_items (owner_id, content_type, filename, text_content)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, owner_id, content_type, filename, text_content, object_hash,
+                  NULL::TEXT AS mime_type, NULL::TEXT AS content_hash, created_at
         "#,
     )
     .bind(user_id)
     .bind(&input.content_type)
-    .bind(input.mime_type.as_deref())
     .bind(input.filename.as_deref())
-    .bind(input.summary.as_deref())
     .bind(&input.text_content)
-    .bind(content_hash)
-    .bind(&input.source_device_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(db)
     .await?;
 
-    set_current_in_tx(&mut tx, user_id, item.id).await?;
-    tx.commit().await?;
-    Ok(item)
+    Ok(decorate_item(item))
 }
 
 pub async fn create_object_current(
@@ -103,88 +80,89 @@ pub async fn create_object_current(
     validate_object_input(&input)?;
     let mut tx = db.begin().await?;
 
-    upsert_local_object_in_tx(
-        &mut tx,
-        &input.object.hash,
-        input.object.byte_size,
-        input.mime_type.as_deref(),
-    )
-    .await?;
+    upsert_object_in_tx(&mut tx, &input.object.hash, input.object.byte_size).await?;
 
     let item = sqlx::query_as::<_, ClipboardItem>(
         r#"
-        INSERT INTO clipboard_items (
-            owner_id, content_type, mime_type, filename, summary,
-            object_hash, content_hash, source_device_id
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $6, $7)
-        RETURNING id, owner_id, content_type, mime_type, filename, summary,
-                  text_content, object_hash, thumbnail_hash, content_hash,
-                  source_device_id, created_at, deleted_at
+        INSERT INTO clipboard_items (owner_id, content_type, filename, object_hash)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, owner_id, content_type, filename, text_content, object_hash,
+                  NULL::TEXT AS mime_type, NULL::TEXT AS content_hash, created_at
         "#,
     )
     .bind(user_id)
     .bind(&input.content_type)
-    .bind(input.mime_type.as_deref())
     .bind(input.filename.as_deref())
-    .bind(input.summary.as_deref())
     .bind(&input.object.hash)
-    .bind(&input.source_device_id)
     .fetch_one(&mut *tx)
     .await?;
 
-    set_current_in_tx(&mut tx, user_id, item.id).await?;
     tx.commit().await?;
-    Ok(item)
+    Ok(decorate_item(item))
 }
 
 pub async fn get_current(
     db: &Pool<Postgres>,
     user_id: UserId,
 ) -> Result<Option<ClipboardItem>, ClipboardServiceError> {
-    sqlx::query_as::<_, ClipboardItem>(
+    let item = sqlx::query_as::<_, ClipboardItem>(
         r#"
-        SELECT ci.id, ci.owner_id, ci.content_type, ci.mime_type, ci.filename, ci.summary,
-               ci.text_content, ci.object_hash, ci.thumbnail_hash, ci.content_hash,
-               ci.source_device_id, ci.created_at, ci.deleted_at
-        FROM current_clipboards cc
-        JOIN clipboard_items ci ON ci.id = cc.clipboard_item_id
-        WHERE cc.user_id = $1 AND ci.deleted_at IS NULL
+        SELECT id, owner_id, content_type, filename, text_content, object_hash,
+               NULL::TEXT AS mime_type, NULL::TEXT AS content_hash, created_at
+        FROM clipboard_items
+        WHERE owner_id = $1
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
         "#,
     )
     .bind(user_id)
     .fetch_optional(db)
-    .await
-    .map_err(ClipboardServiceError::from)
+    .await?;
+
+    Ok(item.map(decorate_item))
 }
 
 pub async fn history(
     db: &Pool<Postgres>,
     user_id: UserId,
-    limit: i64,
+    limit: Option<i64>,
     cursor: Option<i64>,
 ) -> Result<Vec<ClipboardItem>, ClipboardServiceError> {
-    let limit = limit.clamp(1, 100);
+    let items = if let Some(limit) = limit {
+        sqlx::query_as::<_, ClipboardItem>(
+            r#"
+            SELECT id, owner_id, content_type, filename, text_content, object_hash,
+                   NULL::TEXT AS mime_type, NULL::TEXT AS content_hash, created_at
+            FROM clipboard_items
+            WHERE owner_id = $1
+              AND ($2::BIGINT IS NULL OR id < $2)
+            ORDER BY id DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(user_id)
+        .bind(cursor)
+        .bind(limit.clamp(1, 100))
+        .fetch_all(db)
+        .await?
+    } else {
+        sqlx::query_as::<_, ClipboardItem>(
+            r#"
+            SELECT id, owner_id, content_type, filename, text_content, object_hash,
+                   NULL::TEXT AS mime_type, NULL::TEXT AS content_hash, created_at
+            FROM clipboard_items
+            WHERE owner_id = $1
+              AND ($2::BIGINT IS NULL OR id < $2)
+            ORDER BY id DESC
+            "#,
+        )
+        .bind(user_id)
+        .bind(cursor)
+        .fetch_all(db)
+        .await?
+    };
 
-    sqlx::query_as::<_, ClipboardItem>(
-        r#"
-        SELECT id, owner_id, content_type, mime_type, filename, summary,
-               text_content, object_hash, thumbnail_hash, content_hash,
-               source_device_id, created_at, deleted_at
-        FROM clipboard_items
-        WHERE owner_id = $1
-          AND deleted_at IS NULL
-          AND ($2::BIGINT IS NULL OR id < $2)
-        ORDER BY id DESC
-        LIMIT $3
-        "#,
-    )
-    .bind(user_id)
-    .bind(cursor)
-    .bind(limit)
-    .fetch_all(db)
-    .await
-    .map_err(ClipboardServiceError::from)
+    Ok(items.into_iter().map(decorate_item).collect())
 }
 
 pub async fn get_item(
@@ -192,14 +170,12 @@ pub async fn get_item(
     user_id: UserId,
     item_id: i64,
 ) -> Result<ClipboardItem, ClipboardServiceError> {
-    sqlx::query_as::<_, ClipboardItem>(
+    let item = sqlx::query_as::<_, ClipboardItem>(
         r#"
-        SELECT ci.id, ci.owner_id, ci.content_type, ci.mime_type, ci.filename, ci.summary,
-               ci.text_content, ci.object_hash, ci.thumbnail_hash, ci.content_hash,
-               ci.source_device_id, ci.created_at, ci.deleted_at
+        SELECT ci.id, ci.owner_id, ci.content_type, ci.filename, ci.text_content, ci.object_hash,
+               NULL::TEXT AS mime_type, NULL::TEXT AS content_hash, ci.created_at
         FROM clipboard_items ci
         WHERE ci.id = $1
-          AND ci.deleted_at IS NULL
           AND (
               ci.owner_id = $2 OR EXISTS (
                   SELECT 1 FROM shares s
@@ -214,7 +190,9 @@ pub async fn get_item(
     .bind(user_id)
     .fetch_optional(db)
     .await?
-    .ok_or(ClipboardServiceError::NotFound)
+    .ok_or(ClipboardServiceError::NotFound)?;
+
+    Ok(decorate_item(item))
 }
 
 pub async fn delete_item(
@@ -222,36 +200,21 @@ pub async fn delete_item(
     user_id: UserId,
     item_id: i64,
 ) -> Result<(), ClipboardServiceError> {
-    let mut tx = db.begin().await?;
-
     let result = sqlx::query(
         r#"
-        UPDATE clipboard_items
-        SET deleted_at = NOW()
-        WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
+        DELETE FROM clipboard_items
+        WHERE id = $1 AND owner_id = $2
         "#,
     )
     .bind(item_id)
     .bind(user_id)
-    .execute(&mut *tx)
+    .execute(db)
     .await?;
 
     if result.rows_affected() == 0 {
         return Err(ClipboardServiceError::NotFound);
     }
 
-    sqlx::query(
-        r#"
-        DELETE FROM current_clipboards
-        WHERE user_id = $1 AND clipboard_item_id = $2
-        "#,
-    )
-    .bind(user_id)
-    .bind(item_id)
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
     Ok(())
 }
 
@@ -259,27 +222,17 @@ pub async fn get_content_object(
     db: &Pool<Postgres>,
     user_id: UserId,
     item_id: i64,
-    thumbnail: bool,
+    _thumbnail: bool,
 ) -> Result<(ClipboardItem, Option<LocalObject>), ClipboardServiceError> {
     let item = get_item(db, user_id, item_id).await?;
-    let hash = if thumbnail && item.content_type == "image" {
-        item.thumbnail_hash
-            .as_deref()
-            .or(item.object_hash.as_deref())
-    } else if thumbnail {
-        item.thumbnail_hash.as_deref()
-    } else {
-        item.object_hash.as_deref()
-    };
-
-    let Some(hash) = hash else {
+    let Some(hash) = item.object_hash.as_deref() else {
         return Ok((item, None));
     };
 
-    let object = sqlx::query_as::<_, LocalObject>(
+    let byte_size = sqlx::query_scalar::<_, i64>(
         r#"
-        SELECT byte_size, mime_type, storage_path
-        FROM local_objects
+        SELECT byte_size
+        FROM objects
         WHERE hash = $1
         "#,
     )
@@ -288,60 +241,31 @@ pub async fn get_content_object(
     .await?
     .ok_or(ClipboardServiceError::NotFound)?;
 
-    sqlx::query("UPDATE local_objects SET last_accessed_at = NOW() WHERE hash = $1")
-        .bind(hash)
-        .execute(db)
-        .await?;
+    let object = LocalObject {
+        byte_size,
+        storage_path: storage_path_for_hash(hash),
+    };
 
     Ok((item, Some(object)))
 }
 
-async fn set_current_in_tx(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    user_id: UserId,
-    item_id: i64,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        r#"
-        INSERT INTO current_clipboards (user_id, clipboard_item_id, updated_at)
-        VALUES ($1, $2, NOW())
-        ON CONFLICT (user_id) DO UPDATE
-        SET clipboard_item_id = EXCLUDED.clipboard_item_id,
-            updated_at = NOW()
-        "#,
-    )
-    .bind(user_id)
-    .bind(item_id)
-    .execute(&mut **tx)
-    .await?;
-
-    Ok(())
-}
-
-async fn upsert_local_object_in_tx(
+async fn upsert_object_in_tx(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     hash: &str,
     byte_size: i64,
-    mime_type: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO local_objects (hash, byte_size, mime_type)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (hash) DO UPDATE
-        SET last_accessed_at = NOW()
+        INSERT INTO objects (hash, byte_size)
+        VALUES ($1, $2)
+        ON CONFLICT (hash) DO NOTHING
         "#,
     )
     .bind(hash)
     .bind(byte_size)
-    .bind(mime_type)
     .execute(&mut **tx)
     .await?;
 
-    debug_assert_eq!(
-        storage_path_for_hash(hash).len(),
-        "objects/ab/cd/".len() + 60
-    );
     Ok(())
 }
 
@@ -360,15 +284,24 @@ fn validate_text_input(input: &CreateTextInput) -> Result<(), ClipboardServiceEr
 }
 
 fn validate_object_input(input: &CreateObjectInput) -> Result<(), ClipboardServiceError> {
-    if !matches!(
-        input.content_type.as_str(),
-        "text" | "image" | "file" | "binary"
-    ) {
+    if !matches!(input.content_type.as_str(), "image" | "file" | "binary") {
         return Err(ClipboardServiceError::Validation(
-            "upload content_type must be text, image, file, or binary".to_string(),
+            "upload content_type must be image, file, or binary".to_string(),
         ));
     }
     Ok(())
+}
+
+pub(crate) fn decorate_item(mut item: ClipboardItem) -> ClipboardItem {
+    if let Some(text) = item.text_content.as_deref() {
+        item.content_hash = Some(sha256_hex(text.as_bytes()));
+        if matches!(item.content_type.as_str(), "text" | "file_list") {
+            item.mime_type = Some("text/plain; charset=utf-8".to_string());
+        }
+    } else if let Some(hash) = item.object_hash.as_deref() {
+        item.content_hash = Some(hash.to_string());
+    }
+    item
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

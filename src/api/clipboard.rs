@@ -39,22 +39,19 @@ pub fn router() -> Router<Arc<AppState>> {
 #[derive(Deserialize)]
 struct SetCurrentRequest {
     content_type: Option<String>,
-    mime_type: Option<String>,
     filename: Option<String>,
-    summary: Option<String>,
     text_content: String,
 }
 
 #[derive(Deserialize)]
 struct UploadMetadata {
     content_type: Option<String>,
-    mime_type: Option<String>,
     filename: Option<String>,
-    summary: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct HistoryQuery {
+    all: Option<bool>,
     limit: Option<i64>,
     cursor: Option<i64>,
 }
@@ -101,11 +98,8 @@ async fn set_current(
         user.user_id,
         CreateTextInput {
             content_type: payload.content_type.unwrap_or_else(|| "text".to_string()),
-            mime_type: payload.mime_type,
             filename: payload.filename,
-            summary: payload.summary,
             text_content: payload.text_content,
-            source_device_id: user.device_id.clone(),
         },
     )
     .await
@@ -122,9 +116,7 @@ async fn upload_current(
 ) -> Result<Json<ItemResponse>, ApiError> {
     let mut metadata = UploadMetadata {
         content_type: None,
-        mime_type: None,
         filename: None,
-        summary: None,
     };
     let mut object = None;
 
@@ -145,7 +137,6 @@ async fn upload_current(
         }
 
         if name == "file" {
-            let field_mime_type = field.content_type().map(str::to_string);
             let field_filename = field.file_name().map(str::to_string);
             let mut pending = state
                 .object_store
@@ -170,9 +161,6 @@ async fn upload_current(
                 .await
                 .map_err(|_| ApiError::internal("failed to finish object upload"))?;
 
-            if metadata.mime_type.is_none() {
-                metadata.mime_type = field_mime_type;
-            }
             if metadata.filename.is_none() {
                 metadata.filename = field_filename;
             }
@@ -188,10 +176,7 @@ async fn upload_current(
         user.user_id,
         CreateObjectInput {
             content_type,
-            mime_type: metadata.mime_type,
             filename: metadata.filename,
-            summary: metadata.summary,
-            source_device_id: user.device_id.clone(),
             object,
         },
     )
@@ -207,15 +192,20 @@ async fn history(
     Extension(user): Extension<AuthenticatedUser>,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<HistoryResponse>, ApiError> {
-    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let all = query.all.unwrap_or(false);
+    let limit = if all {
+        None
+    } else {
+        Some(query.limit.unwrap_or(20).clamp(1, 100))
+    };
     let items = clipboard_service::history(&state.db, user.user_id, limit, query.cursor)
         .await
         .map_err(ApiError::from)?;
-    let next_cursor = if items.len() == limit as usize {
-        items.last().map(|item| item.id)
-    } else {
-        None
-    };
+    let next_cursor = limit.and_then(|limit| {
+        (items.len() == limit as usize)
+            .then(|| items.last().map(|item| item.id))
+            .flatten()
+    });
 
     Ok(Json(HistoryResponse { items, next_cursor }))
 }
@@ -292,7 +282,6 @@ async fn content_response(
         let mime_type = item
             .mime_type
             .as_deref()
-            .or(object.mime_type.as_deref())
             .unwrap_or("application/octet-stream");
         headers.insert(CONTENT_TYPE, header_value(mime_type)?);
         headers.insert(CONTENT_LENGTH, header_value(&object.byte_size.to_string())?);

@@ -35,7 +35,7 @@ async fn main() {
     let addr = env::var("BIND_ADDR")
         .ok()
         .and_then(|value| value.parse::<SocketAddr>().ok())
-        .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 3000)));
+        .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 3100)));
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
